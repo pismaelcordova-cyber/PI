@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Geoportal Supabase (5 capas)</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Supabase JS v2 -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; }
+    #app { display: grid; grid-template-columns: 320px 1fr; height: 100vh; }
+    #panel { border-right: 1px solid #ddd; padding: 14px; overflow: auto; }
+    #map { height: 100vh; }
+    h2 { margin: 0 0 10px; font-size: 18px; }
+    .row { display:flex; gap:8px; align-items:center; flex-wrap: wrap; margin: 8px 0; }
+    .box { border: 1px solid #e6e6e6; border-radius: 10px; padding: 10px; margin: 10px 0; }
+    .small { font-size: 12px; color: #555; line-height: 1.35; }
+    .ok { color: #0b7a0b; font-weight: bold; }
+    .err { color: #b00020; font-weight: bold; }
+    label { user-select: none; }
+    input[type="number"]{ width: 90px; padding: 6px; }
+    button { padding: 8px 10px; cursor: pointer; }
+    .layer-item { display:flex; justify-content:space-between; gap:8px; padding: 6px 0; border-bottom: 1px dashed #eee; }
+    .layer-item:last-child { border-bottom: none; }
+    .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: #f2f2f2; }
+    .legend { display:grid; gap:6px; margin-top:8px; }
+    .leg { display:flex; gap:8px; align-items:center; font-size: 12px; color:#333; }
+    .sw { width: 14px; height: 14px; border-radius: 3px; border:1px solid rgba(0,0,0,.2); }
+    .hint { font-size: 12px; color:#444; margin-top:8px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+  </style>
+</head>
+
+<body>
+<div id="app">
+  <div id="panel">
+    <h2>🗺️ Geoportal (Supabase + Leaflet)</h2>
+    <div class="small">Proyecto: <span class="pill">ovzxjronqcvwyuwvkofn</span></div>
+
+    <div class="box">
+      <div class="row">
+        <b>Límite por capa:</b>
+        <input id="limit" type="number" min="1" max="5000" value="500">
+        <button id="btnLoad">Cargar capas</button>
+        <button id="btnFit">Zoom a capas</button>
+      </div>
+      <div class="small">
+        Si tu tabla es grande, sube/baja el límite. Para clase, 300–1000 va bien.
+      </div>
+    </div>
+
+    <div class="box">
+      <b>Capas</b>
+      <div id="layerList" class="hint">Aún no cargadas.</div>
+    </div>
+
+    <div class="box">
+      <b>Leyenda</b>
+      <div class="legend">
+        <div class="leg"><span class="sw" style="background:#2e7d32;"></span> Bosque protector</div>
+        <div class="leg"><span class="sw" style="background:#ffb300;"></span> Zona urbana</div>
+        <div class="leg"><span class="sw" style="background:#1e88e5;"></span> Vías</div>
+        <div class="leg"><span class="sw" style="background:#d81b60;"></span> Poblados</div>
+        <div class="leg"><span class="sw" style="background:#6d4c41;"></span> Límite (provincia/cantón)</div>
+      </div>
+    </div>
+
+    <div class="box">
+      <b>Estado</b>
+      <div id="status" class="small">Listo para cargar.</div>
+    </div>
+
+    <div class="small">
+      Tip: dale clic a cualquier feature en el mapa para ver sus atributos.
+    </div>
+  </div>
+
+  <div id="map"></div>
+</div>
+
+<script>
+  // ====== 1) CONFIG SUPABASE ======
+  const SUPABASE_URL = "https://ovzxjronqcvwyuwvkofn.supabase.co";
+  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im92enhqcm9ucWN2d3l1d3Zrb2ZuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU4NDgyMzEsImV4cCI6MjA4MTQyNDIzMX0.TcAY2HkP_QbmxJiDUqCwTJ7cP_F8rmsUYoLS6VydTq4";
+
+  // Evitar choque con global "supabase"
+  const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+  // ====== 2) MAPA BASE ======
+  const map = L.map('map', { zoomControl: true }).setView([-2.9, -79.0], 7);
+
+  // Base OSM
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; OpenStreetMap'
+  }).addTo(map);
+
+  // ====== 3) CAPAS A CARGAR (tus 5 tablas) ======
+  const LAYERS_DEF = [
+    {
+      key: "Lim_reproy", label: "Límite (Lim_reproy)", geomType: "polygon",
+      style: { color: "#6d4c41", weight: 2, fillColor: "#6d4c41", fillOpacity: 0.08 }
+    },
+    {
+      key: "bosque_reproy", label: "Bosque protector", geomType: "polygon",
+      style: { color: "#2e7d32", weight: 1.5, fillColor: "#2e7d32", fillOpacity: 0.25 }
+    },
+    {
+      key: "zona_urb_reproy", label: "Zona urbana", geomType: "polygon",
+      style: { color: "#ffb300", weight: 1.5, fillColor: "#ffb300", fillOpacity: 0.25 }
+    },
+    {
+      key: "vias", label: "Vías", geomType: "line",
+      style: { color: "#1e88e5", weight: 2 }
+    },
+    {
+      key: "poblados", label: "Poblados", geomType: "point",
+      // si poblados viene como punto real, perfecto. Si viene como polígono, igual lo dibuja.
+      pointStyle: { radius: 5, color: "#d81b60", fillColor: "#d81b60", fillOpacity: 0.9, weight: 1 }
+    }
+  ];
+
+  const statusEl = document.getElementById("status");
+  const layerListEl = document.getElementById("layerList");
+  const limitEl = document.getElementById("limit");
+
+  // Almacenamiento de capas Leaflet
+  const leafletLayers = {};     // key -> L.GeoJSON layer
+  const layerCounts = {};       // key -> cantidad
+
+  function setStatus(html, kind="") {
+    statusEl.innerHTML = kind ? `<span class="${kind}">${html}</span>` : html;
+  }
+
+  function safePopup(properties) {
+    // mostrar propiedades (sin geom)
+    const keys = Object.keys(properties || {}).filter(k => k !== "geom");
+    if (keys.length === 0) return "<div class='small'>Sin atributos.</div>";
+
+    let html = "<div class='small'><b>Atributos</b><br/><table>";
+    for (const k of keys.slice(0, 25)) { // limita a 25 campos para que no explote el popup
+      let v = properties[k];
+      if (v === null || v === undefined) v = "";
+      if (typeof v === "object") v = JSON.stringify(v);
+      html += `<tr><td class="mono" style="padding:3px 6px;border:1px solid #eee;"><b>${escapeHtml(k)}</b></td>` +
+              `<td style="padding:3px 6px;border:1px solid #eee;">${escapeHtml(v)}</td></tr>`;
+    }
+    html += "</table></div>";
+    return html;
+  }
+
+  function escapeHtml(x) {
+    return String(x)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
+
+  function rebuildLayerList() {
+    let html = "";
+    for (const def of LAYERS_DEF) {
+      const count = layerCounts[def.key] ?? 0;
+      const checked = leafletLayers[def.key] && map.hasLayer(leafletLayers[def.key]) ? "checked" : "";
+      const disabled = leafletLayers[def.key] ? "" : "disabled";
+
+      html += `
+        <div class="layer-item">
+          <label>
+            <input type="checkbox" data-layer="${def.key}" ${checked} ${disabled}>
+            ${def.label}
+          </label>
+          <span class="pill">${count}</span>
+        </div>
+      `;
+    }
+    layerListEl.innerHTML = html;
+
+    // eventos toggle
+    layerListEl.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener("change", (e) => {
+        const key = e.target.getAttribute("data-layer");
+        const lyr = leafletLayers[key];
+        if (!lyr) return;
+        if (e.target.checked) lyr.addTo(map);
+        else map.removeLayer(lyr);
+      });
+    });
+  }
+
+  function getCombinedBounds() {
+    let bounds = null;
+    for (const k in leafletLayers) {
+      const lyr = leafletLayers[k];
+      if (lyr && lyr.getLayers().length) {
+        const b = lyr.getBounds();
+        if (b.isValid()) bounds = bounds ? bounds.extend(b) : b;
+      }
+    }
+    return bounds;
+  }
+
+  function geomToGeoJSON(geomValue) {
+    // En tu caso, geom ya viene como objeto GeoJSON (se ve "type":"MultiPolygon"...)
+    // Si viniera como string, lo parseamos.
+    if (!geomValue) return null;
+    if (typeof geomValue === "string") {
+      try { return JSON.parse(geomValue); } catch { return null; }
+    }
+    if (typeof geomValue === "object") return geomValue;
+    return null;
+  }
+
+  async function loadOneLayer(def, limit) {
+    setStatus(`⏳ Cargando <b>${def.key}</b> (limit ${limit})...`);
+
+    const { data, error } = await sb.from(def.key).select("*").limit(limit);
+
+    if (error) {
+      setStatus(`❌ ${def.key}: ${escapeHtml(error.message)}`, "err");
+      layerCounts[def.key] = 0;
+      return;
+    }
+
+    if (!data || data.length === 0) {
+      setStatus(`⚠️ ${def.key}: sin filas.`, "err");
+      layerCounts[def.key] = 0;
+      return;
+    }
+
+    // Convertimos rows -> FeatureCollection
+    const features = [];
+    for (const row of data) {
+      const g = geomToGeoJSON(row.geom);
+      if (!g) continue;
+
+      // properties sin geom
+      const props = { ...row };
+      delete props.geom;
+
+      features.push({
+        type: "Feature",
+        geometry: (g.type && g.coordinates) ? { type: g.type, coordinates: g.coordinates } : g,
+        properties: props
+      });
+    }
+
+    const fc = { type: "FeatureCollection", features };
+
+    // Remueve capa anterior si existía
+    if (leafletLayers[def.key]) {
+      map.removeLayer(leafletLayers[def.key]);
+      delete leafletLayers[def.key];
+    }
+
+    // Crea capa Leaflet según tipo
+    let layer;
+    if (def.geomType === "point") {
+      layer = L.geoJSON(fc, {
+        pointToLayer: (_, latlng) => L.circleMarker(latlng, def.pointStyle),
+        onEachFeature: (feature, lyr) => lyr.bindPopup(safePopup(feature.properties))
+      });
+    } else if (def.geomType === "line") {
+      layer = L.geoJSON(fc, {
+        style: def.style,
+        onEachFeature: (feature, lyr) => lyr.bindPopup(safePopup(feature.properties))
+      });
+    } else {
+      // polygon
+      layer = L.geoJSON(fc, {
+        style: def.style,
+        onEachFeature: (feature, lyr) => lyr.bindPopup(safePopup(feature.properties))
+      });
+    }
+
+    leafletLayers[def.key] = layer;
+    layerCounts[def.key] = fc.features.length;
+
+    // Por defecto: agregar al mapa
+    layer.addTo(map);
+
+    setStatus(`✅ ${def.key}: cargado (${fc.features.length} features).`, "ok");
+  }
+
+  async function loadAll() {
+    const limit = Math.max(1, Math.min(5000, parseInt(limitEl.value || "500", 10)));
+
+    setStatus("⏳ Iniciando carga de capas...");
+    // Cargar en orden (para no saturar)
+    for (const def of LAYERS_DEF) {
+      await loadOneLayer(def, limit);
+    }
+
+    rebuildLayerList();
+
+    const b = getCombinedBounds();
+    if (b && b.isValid()) {
+      map.fitBounds(b.pad(0.08));
+      setStatus("✅ Todo cargado. Zoom aplicado.", "ok");
+    } else {
+      setStatus("✅ Todo cargado. (Sin bounds válidos para zoom automático)", "ok");
+    }
+  }
+
+  // Botones
+  document.getElementById("btnLoad").addEventListener("click", loadAll);
+  document.getElementById("btnFit").addEventListener("click", () => {
+    const b = getCombinedBounds();
+    if (b && b.isValid()) map.fitBounds(b.pad(0.08));
+  });
+
+  // Estado inicial
+  rebuildLayerList();
+  setStatus("Listo. Pulsa <b>Cargar capas</b>.");
+</script>
+</body>
+</html>
